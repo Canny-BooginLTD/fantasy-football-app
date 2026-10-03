@@ -6,6 +6,7 @@ from discord.ext import commands
 from watson_query import WatsonLeagueDB
 from watson_predictor import WatsonPredictor
 from watson_analysis import WatsonAnalysis
+from watson_result_scraper import WatsonResultScraper
 from team_abbrev import get_abbreviation, get_team_name, list_all_abbreviations, list_all_with_names
 import os
 from dotenv import load_dotenv
@@ -606,6 +607,56 @@ async def record_result(ctx, pred_id: str, winner: str, team1_score: float, team
             color=discord.Color.green()
         )
         embed.add_field(name="Final Score", value=f"Team 1: {team1_score}\nTeam 2: {team2_score}", inline=False)
+        await ctx.send(embed=embed)
+
+    except Exception as e:
+        embed = discord.Embed(title="❌ Error", description=str(e), color=discord.Color.red())
+        await ctx.send(embed=embed)
+
+@bot.command(name="sync_results", help="Auto-sync completed matchup results (Mondays only)")
+async def sync_results(ctx):
+    """Automatically scan for completed matchups and record results.
+    Only runs on Mondays after league week completes (Thu-Mon schedule)."""
+    try:
+        from datetime import datetime
+
+        # Check if today is Monday (weekday() returns 0 for Monday)
+        today = datetime.now()
+        if today.weekday() != 0:  # 0 = Monday
+            day_name = today.strftime("%A")
+            embed = discord.Embed(
+                title="⏰ Not Yet",
+                description=f"Today is {day_name}. Results can only be synced on **Monday** after the league week ends.\n\nCome back Monday night!",
+                color=discord.Color.orange()
+            )
+            await ctx.send(embed=embed)
+            return
+
+        scraper = WatsonResultScraper()
+        summary = scraper.sync_results(2026)
+        scraper.close()
+
+        embed = discord.Embed(
+            title="📊 Weekly Results Sync",
+            description=f"Season {summary['season']} - Monday Night Results",
+            color=discord.Color.green()
+        )
+
+        embed.add_field(name="Processed", value=f"{summary['processed']} matchups", inline=True)
+        embed.add_field(name="Newly Recorded", value=f"{summary['newly_recorded']} results", inline=True)
+        embed.add_field(name="Already Graded", value=f"{summary['already_graded']}", inline=True)
+        embed.add_field(name="No Prediction Found", value=f"{summary['no_prediction_found']}", inline=True)
+
+        if summary['results']:
+            results_text = ""
+            for result in summary['results']:
+                status = "✅" if result['correct'] else "❌"
+                results_text += f"{status} {result['matchup']}\n"
+                results_text += f"   Pred: {result['predicted_winner']} | Actual: {result['actual_winner']} ({result['scores']})\n"
+            embed.add_field(name="Newly Recorded", value=results_text, inline=False)
+        else:
+            embed.add_field(name="Status", value="No new results to record", inline=False)
+
         await ctx.send(embed=embed)
 
     except Exception as e:
