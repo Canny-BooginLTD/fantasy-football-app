@@ -322,6 +322,36 @@ class WatsonPredictor:
             "matchups": len(h2h)
         }
 
+    def predict_season_winner(self, year: int = None) -> Dict[str, Any]:
+        """Predict season winner based on historical performance and current projections"""
+        if year is None:
+            year = max(self.seasons)
+
+        standings = self.db.get_standings(year, limit=100)
+
+        predictions = []
+        for team in standings:
+            team_name = team['team_name']
+            stats = self.get_team_stats(team_name)
+
+            predictions.append({
+                "team": team_name,
+                "current_record": f"{team['wins']}-{team['losses']}",
+                "current_points": round(team['points_for'], 2),
+                "historical_avg": round(stats['avg_points_per_season'], 2),
+                "win_probability": round(stats['win_rate'] * 100, 1),
+                "total_historical_wins": stats['total_wins']
+            })
+
+        # Sort by win probability
+        predictions.sort(key=lambda x: x['win_probability'], reverse=True)
+
+        return {
+            "year": year,
+            "predictions": predictions,
+            "top_3": predictions[:3] if len(predictions) >= 3 else predictions
+        }
+
     def close(self):
         self.db.close()
 

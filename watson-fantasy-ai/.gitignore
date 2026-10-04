@@ -1,5 +1,7 @@
 .env
 .env.local
+.env.discord
+credentials
 __pycache__/
 *.py[cod]
 *$py.class

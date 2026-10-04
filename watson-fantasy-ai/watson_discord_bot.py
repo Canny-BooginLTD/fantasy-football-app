@@ -7,6 +7,7 @@ from watson_query import WatsonLeagueDB
 from watson_predictor import WatsonPredictor
 from watson_analysis import WatsonAnalysis
 from watson_result_scraper import WatsonResultScraper
+from sleeper_scraper import SleeperScraper
 from team_abbrev import get_abbreviation, get_team_name, list_all_abbreviations, list_all_with_names
 import os
 from dotenv import load_dotenv
@@ -411,25 +412,30 @@ async def predict_matchup(ctx, *, teams: str):
         embed = discord.Embed(title="❌ Error", description=str(e), color=discord.Color.red())
         await ctx.send(embed=embed)
 
-@bot.command(name="predict_season", help="!predict_season <year> - Predict season winner")
-async def predict_season(ctx, year: int):
+@bot.command(name="predict_season", help="!predict_season [year] - Predict season winner")
+async def predict_season(ctx, year: int = None):
     """Predict season winner based on historical performance"""
     try:
         predictor = WatsonPredictor()
-        season_pred = predictor.predict_season_winner(year)
+        prediction = predictor.predict_season_winner(year)
         predictor.close()
 
-        predictions_text = ""
-        for i, team in enumerate(season_pred['top_contenders'], 1):
-            predictions_text += f"{i}. **{team['team']}** - {team['win_probability']}% chance\n"
-            predictions_text += f"   ↳ Avg Points: {team['avg_points']}\n"
-
         embed = discord.Embed(
-            title=f"🏆 Season {year} Predictions",
-            description="Top Contenders Based on Historical Performance:",
+            title=f"🏆 Season {prediction['year']} Winner Prediction",
+            description="Based on historical win rates and current performance",
             color=discord.Color.gold()
         )
-        embed.add_field(name="Top 3 Teams", value=predictions_text, inline=False)
+
+        top_3 = prediction['top_3']
+        for i, team in enumerate(top_3, 1):
+            medal = ["🥇", "🥈", "🥉"][i-1]
+            embed.add_field(
+                name=f"{medal} #{i} - {team['team']}",
+                value=f"Win Probability: **{team['win_probability']}%**\nCurrent: {team['current_record']}\nPoints: {team['current_points']}\nHistorical Avg: {team['historical_avg']}",
+                inline=False
+            )
+
+        embed.set_footer(text="Prediction based on historical win rates and current season performance")
         await ctx.send(embed=embed)
 
     except Exception as e:
