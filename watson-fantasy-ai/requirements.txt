@@ -1,5 +1,7 @@
 requests>=2.28.0
 python-dotenv>=0.20.0
+discord.py>=2.0.0
+sleeper-wrapper>=1.1.0
 reportlab>=4.0.0
 pytest>=7.0.0
 beautifulsoup4>=4.11.0

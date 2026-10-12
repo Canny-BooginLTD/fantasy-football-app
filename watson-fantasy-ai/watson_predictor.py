@@ -3,6 +3,8 @@
 
 from watson_query import WatsonLeagueDB
 from typing import Dict, List, Any
+import json
+from pathlib import Path
 
 class WatsonPredictor:
     """Analyze historical data and make predictions"""
@@ -10,6 +12,18 @@ class WatsonPredictor:
     def __init__(self):
         self.db = WatsonLeagueDB()
         self.seasons = self.db.get_seasons()
+        self.sleeper_cache = self._load_sleeper_cache()
+
+    def _load_sleeper_cache(self) -> Dict[str, Any]:
+        """Load cached Sleeper projections"""
+        cache_file = Path.home() / ".watson" / "sleeper_cache.json"
+        if cache_file.exists():
+            try:
+                with open(cache_file, 'r') as f:
+                    return json.load(f)
+            except:
+                return {}
+        return {}
 
     def _find_team_name(self, team_input: str) -> str:
         """Find the actual team name in the database with robust normalization"""
@@ -119,13 +133,23 @@ class WatsonPredictor:
         if not current_matchup:
             return self.predict_matchup_historical_only(actual_team1, actual_team2)
 
-        # Get projections (80% weight)
-        if current_matchup['home_team'] == actual_team1:
-            proj1 = current_matchup.get('home_projection', 0)
-            proj2 = current_matchup.get('away_projection', 0)
-        else:
-            proj1 = current_matchup.get('away_projection', 0)
-            proj2 = current_matchup.get('home_projection', 0)
+        # Get projections from Sleeper cache (80% weight)
+        proj1 = current_matchup.get('home_projection', 0)
+        proj2 = current_matchup.get('away_projection', 0)
+
+        # Try to load from Sleeper cache if ESPN projections are zero
+        if (proj1 == 0 or proj2 == 0) and self.sleeper_cache:
+            # Find current week matchups in cache
+            for week_key in self.sleeper_cache:
+                if week_key.startswith('week_') and week_key.endswith('_matchups'):
+                    cached_matchups = self.sleeper_cache.get(week_key, [])
+                    for cached_m in cached_matchups:
+                        # Try to match by roster IDs or team names
+                        if current_matchup['home_team'] == actual_team1:
+                            if proj1 == 0:
+                                proj1 = cached_m.get('home_projection', proj1)
+                            if proj2 == 0:
+                                proj2 = cached_m.get('away_projection', proj2)
 
         # Get historical (20% weight)
         hist1 = self.get_team_stats(actual_team1)['avg_points_per_season']

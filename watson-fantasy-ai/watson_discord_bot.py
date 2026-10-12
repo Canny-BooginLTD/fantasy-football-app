@@ -381,31 +381,41 @@ async def predict_current(ctx, *, teams: str):
 async def predict_matchup(ctx, *, teams: str):
     """Predict outcome of a matchup"""
     try:
-        # Parse team names from input (format: "Team1 vs Team2")
-        if " vs " in teams:
-            team1, team2 = teams.split(" vs ")
-            team1 = team1.strip()
-            team2 = team2.strip()
-        else:
+        # Case-insensitive split
+        teams_lower = teams.lower()
+        if " vs " not in teams_lower:
             embed = discord.Embed(title="❌ Error", description="Format: !predict_matchup <team1> vs <team2>", color=discord.Color.red())
             await ctx.send(embed=embed)
             return
+
+        idx = teams_lower.find(" vs ")
+        team1_input = teams[:idx].strip()
+        team2_input = teams[idx + 4:].strip()
+
+        # Resolve abbreviations/aliases
+        team1 = get_team_name(team1_input) or team1_input
+        team2 = get_team_name(team2_input) or team2_input
 
         predictor = WatsonPredictor()
         prediction = predictor.predict_matchup(team1, team2)
         predictor.close()
 
+        if "error" in prediction:
+            embed = discord.Embed(title="❌ Error", description=prediction['error'], color=discord.Color.red())
+            await ctx.send(embed=embed)
+            return
+
         embed = discord.Embed(
-            title="🔮 Matchup Prediction",
+            title="🔮 Matchup Prediction (Historical)",
             description=f"**{prediction['matchup']}**",
-            color=discord.Color.purple()
+            color=discord.Color.blue()
         )
         embed.add_field(name="Predicted Winner", value=f"🏆 {prediction['predicted_winner']}", inline=False)
-        embed.add_field(name="Confidence", value=f"{prediction['confidence']}%", inline=False)
-        embed.add_field(name=f"{team1} Avg Points", value=f"{prediction['team1_avg_points']}", inline=True)
-        embed.add_field(name=f"{team2} Avg Points", value=f"{prediction['team2_avg_points']}", inline=True)
-        embed.add_field(name=f"{team1} Win Rate", value=f"{prediction['team1_win_rate']}%", inline=True)
-        embed.add_field(name=f"{team2} Win Rate", value=f"{prediction['team2_win_rate']}%", inline=True)
+        embed.add_field(name="Confidence", value=f"{prediction.get('confidence', 'N/A')}%", inline=False)
+        embed.add_field(name="Team 1 Avg Points", value=f"{prediction.get('team1_avg', 'N/A')}", inline=True)
+        embed.add_field(name="Team 2 Avg Points", value=f"{prediction.get('team2_avg', 'N/A')}", inline=True)
+        embed.add_field(name="Team 1 Win Rate", value=f"{prediction.get('team1_winrate', 'N/A')}%", inline=True)
+        embed.add_field(name="Team 2 Win Rate", value=f"{prediction.get('team2_winrate', 'N/A')}%", inline=True)
         await ctx.send(embed=embed)
 
     except Exception as e:
@@ -446,32 +456,37 @@ async def predict_season(ctx, year: int = None):
 async def head_to_head(ctx, *, teams: str):
     """Show head-to-head matchup history"""
     try:
-        if " vs " in teams:
-            team1, team2 = teams.split(" vs ")
-            team1 = team1.strip()
-            team2 = team2.strip()
-        else:
+        # Case-insensitive split
+        teams_lower = teams.lower()
+        if " vs " not in teams_lower:
             embed = discord.Embed(title="❌ Error", description="Format: !head_to_head <team1> vs <team2>", color=discord.Color.red())
             await ctx.send(embed=embed)
             return
+
+        idx = teams_lower.find(" vs ")
+        team1_input = teams[:idx].strip()
+        team2_input = teams[idx + 4:].strip()
+
+        # Resolve abbreviations/aliases
+        team1 = get_team_name(team1_input) or team1_input
+        team2 = get_team_name(team2_input) or team2_input
 
         predictor = WatsonPredictor()
         h2h = predictor.head_to_head(team1, team2)
         predictor.close()
 
-        history_text = ""
-        for match in h2h['matchup_history']:
-            winner = match['home_team'] if match['home_score'] > match['away_score'] else match['away_team']
-            history_text += f"**{match['season']}**: {match['home_team']} ({match['home_score']:.1f}) vs {match['away_team']} ({match['away_score']:.1f})\n"
+        if "error" in h2h:
+            embed = discord.Embed(title="❌ Error", description=h2h['error'], color=discord.Color.red())
+            await ctx.send(embed=embed)
+            return
 
         embed = discord.Embed(
             title="⚔️ Head-to-Head History",
-            description=f"**{team1}** vs **{team2}**",
+            description=f"**{h2h['team1']}** vs **{h2h['team2']}**",
             color=discord.Color.red()
         )
-        embed.add_field(name="Record", value=h2h['h2h_record'], inline=True)
-        embed.add_field(name="Total Matchups", value=h2h['total_matchups'], inline=True)
-        embed.add_field(name="Matchup History", value=history_text or "No matchups found", inline=False)
+        embed.add_field(name="Record", value=h2h['record'], inline=True)
+        embed.add_field(name="Total Matchups", value=h2h['matchups'], inline=True)
         await ctx.send(embed=embed)
 
     except Exception as e:
@@ -544,17 +559,25 @@ async def team_stats(ctx, *, team_name: str):
         await ctx.send(embed=embed)
 
 @bot.command(name="save_prediction", help="!save_prediction <team1> vs <team2> - Save a prediction for later analysis")
-async def save_prediction(ctx, *, teams: str):
+async def save_prediction(ctx, *, teams: str = None):
     """Save current prediction for accuracy tracking"""
     try:
-        if " vs " not in teams:
-            embed = discord.Embed(title="❌ Error", description="Format: !save_prediction <team1> vs <team2>", color=discord.Color.red())
+        if not teams or " vs " not in teams:
+            embed = discord.Embed(
+                title="ℹ️ Note",
+                description="Predictions are **automatically saved** when you use `!predict_current`!\n\nBut you can manually save with:\n`!save_prediction <team1> vs <team2>`",
+                color=discord.Color.blue()
+            )
             await ctx.send(embed=embed)
             return
 
-        team1, team2 = teams.split(" vs ")
-        team1 = team1.strip()
-        team2 = team2.strip()
+        idx = teams.lower().find(" vs ")
+        team1_input = teams[:idx].strip()
+        team2_input = teams[idx + 4:].strip()
+
+        # Resolve aliases
+        team1 = get_team_name(team1_input) or team1_input
+        team2 = get_team_name(team2_input) or team2_input
 
         predictor = WatsonPredictor()
         prediction = predictor.predict_current(team1, team2)
@@ -567,7 +590,7 @@ async def save_prediction(ctx, *, teams: str):
 
         analysis = WatsonAnalysis()
         pred_id = analysis.save_prediction(
-            f"{team1} vs {team2}",
+            f"{prediction['team1']['name']} vs {prediction['team2']['name']}",
             prediction['team1']['name'],
             prediction['team2']['name'],
             prediction['predicted_winner'],
@@ -619,6 +642,54 @@ async def record_result(ctx, pred_id: str, winner: str, team1_score: float, team
         embed = discord.Embed(title="❌ Error", description=str(e), color=discord.Color.red())
         await ctx.send(embed=embed)
 
+@bot.command(name="refresh_projections", help="Sync Sleeper player projections for ESPN rosters")
+async def refresh_projections(ctx, week: str = None):
+    """Sync Sleeper player projections and map to ESPN rosters"""
+    try:
+        # Convert week to int, default to 1
+        if week is None:
+            week_num = 1
+        else:
+            try:
+                week_num = int(week)
+            except ValueError:
+                week_num = 1
+
+        scraper = SleeperScraper()
+        result = scraper.sync_espn_rosters_with_sleeper(week_num)
+
+        if result:
+            matchups = result.get('matchups', [])
+            embed = discord.Embed(
+                title="✅ Projections Synced",
+                description=f"Week {week_num} - Mapped Sleeper player stats to ESPN rosters",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Matchups", value=f"{len(matchups)} matchups updated", inline=True)
+
+            # Show sample
+            if matchups:
+                m = matchups[0]
+                embed.add_field(
+                    name="Sample",
+                    value=f"{m['home_team']}: {m['home_projection']} pts\nvs\n{m['away_team']}: {m['away_projection']} pts",
+                    inline=False
+                )
+
+            embed.set_footer(text="✅ Ready for predictions! Sleeper player stats now loaded.")
+            await ctx.send(embed=embed)
+        else:
+            embed = discord.Embed(
+                title="❌ Sync Failed",
+                description="Could not fetch Sleeper player projections",
+                color=discord.Color.red()
+            )
+            await ctx.send(embed=embed)
+
+    except Exception as e:
+        embed = discord.Embed(title="❌ Error", description=str(e), color=discord.Color.red())
+        await ctx.send(embed=embed)
+
 @bot.command(name="sync_results", help="Auto-sync completed matchup results (Mondays only)")
 async def sync_results(ctx):
     """Automatically scan for completed matchups and record results.
@@ -664,6 +735,28 @@ async def sync_results(ctx):
             embed.add_field(name="Status", value="No new results to record", inline=False)
 
         await ctx.send(embed=embed)
+
+    except Exception as e:
+        embed = discord.Embed(title="❌ Error", description=str(e), color=discord.Color.red())
+        await ctx.send(embed=embed)
+
+@bot.command(name="sync", help="!sync [year] - Pull live ESPN scores/standings (official source) into the DB")
+async def sync_espn(ctx, year: int = 2026):
+    """Refresh actual scores, player points, and standings from ESPN"""
+    try:
+        import asyncio
+        from espn_update import update_season
+
+        msg = await ctx.send(f"📡 Pulling live ESPN data for season {year}...")
+        result = await asyncio.to_thread(update_season, year)
+
+        embed = discord.Embed(
+            title="✅ ESPN Sync Complete",
+            description=f"Season {result['season']} updated from ESPN (official league source)",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Matchups", value=f"{result['matchups']} through week {result['week']}", inline=True)
+        await msg.edit(content=None, embed=embed)
 
     except Exception as e:
         embed = discord.Embed(title="❌ Error", description=str(e), color=discord.Color.red())
@@ -723,6 +816,68 @@ async def prediction_accuracy(ctx):
         embed = discord.Embed(title="❌ Error", description=str(e), color=discord.Color.red())
         await ctx.send(embed=embed)
 
+@bot.command(name="player", help="!player <player_name> - Show player stats and projections")
+async def player(ctx, *, player_name: str):
+    """Look up individual player stats and projections"""
+    try:
+        db = WatsonLeagueDB()
+        current_season = max(db.get_seasons())
+        matchups = db.get_matchups(current_season)
+        db.close()
+
+        # Search for player across all matchups
+        found_players = []
+        player_lower = player_name.lower()
+
+        for matchup in matchups:
+            for player in matchup.get('home_players', []):
+                if player_lower in player.get('name', '').lower():
+                    found_players.append({
+                        "name": player.get('name'),
+                        "position": player.get('position'),
+                        "points": player.get('points', 0),
+                        "projected_points": player.get('projected_points', 0),
+                        "slot": player.get('slot'),
+                        "team": matchup['home_team']
+                    })
+
+            for player in matchup.get('away_players', []):
+                if player_lower in player.get('name', '').lower():
+                    found_players.append({
+                        "name": player.get('name'),
+                        "position": player.get('position'),
+                        "points": player.get('points', 0),
+                        "projected_points": player.get('projected_points', 0),
+                        "slot": player.get('slot'),
+                        "team": matchup['away_team']
+                    })
+
+        if not found_players:
+            embed = discord.Embed(
+                title="❌ Player Not Found",
+                description=f"No player found matching '{player_name}'\n\nTry searching by first name, last name, or partial name.",
+                color=discord.Color.red()
+            )
+            await ctx.send(embed=embed)
+            return
+
+        # Show all matching players
+        for player in found_players:
+            embed = discord.Embed(
+                title=f"🏈 {player['name']}",
+                description=f"**{player['position']}** | {player['team']}",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Actual Points", value=f"{player['points']:.1f}", inline=True)
+            embed.add_field(name="Projected Points", value=f"{player['projected_points']:.1f}", inline=True)
+            if player['slot']:
+                embed.add_field(name="Slot", value=player['slot'], inline=True)
+            await ctx.send(embed=embed)
+
+    except Exception as e:
+        embed = discord.Embed(title="❌ Error", description=str(e), color=discord.Color.red())
+        await ctx.send(embed=embed)
+
 @bot.command(name="team_abbrev", help="Show all team abbreviations and player names")
 async def team_abbrev(ctx):
     """Show all team abbreviations and player names for quick reference"""
@@ -750,8 +905,10 @@ async def help_watson(ctx):
 
     # General commands
     embed.add_field(name="📋 General Commands", value="", inline=False)
+    embed.add_field(name="!sync [year]", value="Pull live ESPN scores/standings (official source)", inline=False)
     embed.add_field(name="!team_abbrev", value="Show all team abbreviations", inline=False)
     embed.add_field(name="!teams", value="List all league teams", inline=False)
+    embed.add_field(name="!player <name>", value="Look up player stats (e.g., !player josh allen)", inline=False)
     embed.add_field(name="!seasons", value="List all available seasons", inline=False)
     embed.add_field(name="!standings <year>", value="Show standings for a season (e.g., !standings 2024)", inline=False)
     embed.add_field(name="!matchups <year>", value="Show all matchups for a season (e.g., !matchups 2024)", inline=False)

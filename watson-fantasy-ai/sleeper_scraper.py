@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
-"""Watson Sleeper API Scraper - Fetch current season projections (once per week)"""
+"""Watson Sleeper Player Stats Scraper - Get player projections for ESPN rosters"""
 
-from sleeper_wrapper import Stats, League
+from sleeper_wrapper import Stats
+from watson_query import WatsonLeagueDB
 from typing import Dict, List, Any
 import json
 from pathlib import Path
 from datetime import datetime
 
 class SleeperScraper:
-    """Fetch current week projections and stats from Sleeper API (cached weekly)"""
+    """Fetch Sleeper player projections and map to ESPN rosters"""
 
     CACHE_FILE = Path.home() / ".watson" / "sleeper_cache.json"
 
-    def __init__(self, league_id: str):
-        self.league_id = league_id
+    def __init__(self):
         self.stats = Stats()
-        self.league = League(league_id)
         self.cache = self._load_cache()
 
     def _load_cache(self) -> Dict[str, Any]:
@@ -46,103 +45,117 @@ class SleeperScraper:
         except:
             return True
 
-    def get_week_projections(self, week: int) -> Dict[str, float]:
-        """Get player projections for a specific week (from cache or API)"""
-        # Try cache first
-        if f"week_{week}_projections" in self.cache:
-            return self.cache[f"week_{week}_projections"]
-
-        # Fetch from API
+    def get_player_projections(self, week: int) -> Dict[str, float]:
+        """Get all player projections for a week from Sleeper"""
         try:
             projections = self.stats.get_week_projections("nfl", week)
             return projections if projections else {}
         except Exception as e:
-            print(f"Error fetching projections for week {week}: {e}")
+            print(f"❌ Error fetching player projections for week {week}: {e}")
             return {}
 
-    def sync_weekly_data(self, week: int) -> Dict[str, Any]:
-        """Sync all weekly data from Sleeper API once (call this weekly)"""
-        print(f"📡 Syncing Sleeper data for week {week}...")
+    def sync_espn_rosters_with_sleeper(self, week: int) -> Dict[str, Any]:
+        """Sync ESPN matchups with Sleeper player projections"""
+        print(f"📡 Syncing Sleeper player projections for week {week}...")
 
         try:
-            # Fetch all data
-            projections = self.stats.get_week_projections("nfl", week)
-            stats = self.stats.get_week_stats("nfl", week)
-            rosters = self.league.get_rosters()
-            matchups = self.league.get_matchups(week)
+            # Get Sleeper player projections
+            player_projections = self.get_player_projections(week)
 
-            # Calculate matchup projections
-            matchup_projs = []
-            if matchups and projections:
-                for matchup in matchups:
-                    home_roster = next((r for r in rosters if r['roster_id'] == matchup.get('roster_id')), None)
-                    away_roster = next((r for r in rosters if r['roster_id'] == matchup.get('opponent_id')), None)
+            # Get ESPN rosters and matchups
+            db = WatsonLeagueDB()
+            current_season = max(db.get_seasons())
+            matchups = db.get_matchups(current_season)
+            db.close()
 
-                    if home_roster and away_roster:
-                        home_proj = self._calculate_team_projection(home_roster.get('players', []), projections)
-                        away_proj = self._calculate_team_projection(away_roster.get('players', []), projections)
+            # Map ESPN players to Sleeper projections
+            enhanced_matchups = []
+            for matchup in matchups:
+                home_proj = self._calculate_team_projection(
+                    matchup.get('home_players', []),
+                    player_projections
+                )
+                away_proj = self._calculate_team_projection(
+                    matchup.get('away_players', []),
+                    player_projections
+                )
 
-                        matchup_projs.append({
-                            "matchup_id": matchup.get('matchup_id'),
-                            "home_roster_id": home_roster['roster_id'],
-                            "away_roster_id": away_roster['roster_id'],
-                            "home_projection": home_proj,
-                            "away_projection": away_proj,
-                            "week": week
-                        })
+                enhanced_matchups.append({
+                    "matchup_id": matchup.get('matchup_id', 'unknown'),
+                    "home_team": matchup['home_team'],
+                    "away_team": matchup['away_team'],
+                    "home_projection": home_proj,
+                    "away_projection": away_proj,
+                    "home_players": matchup.get('home_players', []),
+                    "away_players": matchup.get('away_players', []),
+                    "week": week
+                })
 
-            # Build cache
+            # Save to cache
             cache_data = {
                 "timestamp": datetime.now().isoformat(),
                 "week": week,
-                f"week_{week}_projections": projections or {},
-                f"week_{week}_stats": stats or {},
-                f"week_{week}_matchups": matchup_projs,
-                "rosters": rosters or [],
+                "season": current_season,
+                "player_projections": player_projections,
+                "matchups": enhanced_matchups
             }
 
-            # Update and save
             self.cache.update(cache_data)
             self._save_cache(self.cache)
 
-            print(f"✅ Synced {len(matchup_projs)} matchup projections for week {week}")
+            print(f"✅ Synced {len(enhanced_matchups)} matchups with Sleeper projections")
             return cache_data
 
         except Exception as e:
-            print(f"❌ Error syncing Sleeper data: {e}")
+            print(f"❌ Error syncing data: {e}")
             return {}
 
-    def _calculate_team_projection(self, roster_players: List[Dict[str, Any]], projections: Dict[str, float]) -> float:
-        """Calculate total team projection from player projections"""
+    def _calculate_team_projection(self, players: List[Dict[str, Any]], projections: Dict[str, float]) -> float:
+        """Calculate team projection by summing player Sleeper projections"""
         total = 0.0
-        for player in roster_players:
+        for player in players:
+            # Try to match player by name or ID
+            player_name = player.get('name', '').lower()
             player_id = player.get('player_id')
-            if player_id and player_id in projections:
-                total += projections.get(player_id, 0)
+
+            # Search in Sleeper projections by ID or name
+            for proj_id, proj_points in projections.items():
+                # Sleeper projections are keyed by player ID
+                if player_id and proj_id == str(player_id):
+                    total += proj_points
+                    break
+
         return round(total, 2)
 
-    def get_matchup_projections(self, week: int) -> List[Dict[str, Any]]:
-        """Get cached matchup projections for a week"""
-        return self.cache.get(f"week_{week}_matchups", [])
+    def get_cached_matchups(self) -> List[Dict[str, Any]]:
+        """Get cached matchups with projections"""
+        return self.cache.get('matchups', [])
 
-    def get_cached_projection(self, week: int, team_name: str) -> float:
-        """Get cached projection for a team (returns 0 if not found)"""
-        matchups = self.get_matchup_projections(week)
-        # This is a placeholder - in real use, map team_name to roster_id
+    def get_player_projection(self, player_name: str) -> float:
+        """Get cached projection for a specific player"""
+        projections = self.cache.get('player_projections', {})
+        for proj_id, points in projections.items():
+            # This would need player ID mapping
+            pass
         return 0.0
 
 
 if __name__ == "__main__":
-    league_id = "YOUR_LEAGUE_ID"
-    scraper = SleeperScraper(league_id)
+    scraper = SleeperScraper()
 
     print("\n" + "="*80)
-    print("SLEEPER WEEKLY SYNC")
+    print("SLEEPER PLAYER PROJECTIONS SYNC")
     print("="*80 + "\n")
 
     # Sync current week
-    scraper.sync_weekly_data(1)
+    result = scraper.sync_espn_rosters_with_sleeper(1)
 
-    print("\n✅ Done! Projections cached for offline use.")
+    if result:
+        matchups = result.get('matchups', [])
+        print(f"\n✅ Synced {len(matchups)} matchups:")
+        for m in matchups:
+            print(f"  {m['home_team']} ({m['home_projection']}) vs {m['away_team']} ({m['away_projection']})")
+
+    print("\n✅ Done! Projections cached locally.")
 
 
