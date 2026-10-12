@@ -1,0 +1,5 @@
+discord.py>=2.0.0
+python-dotenv>=0.20.0
+tinydb>=4.8.0
+sleeper-wrapper>=1.1.0
+espn-api>=0.35.0
