@@ -64,6 +64,25 @@ class WatsonPredictor:
 
         return None
 
+    def _franchise_names(self, team_name: str) -> set:
+        """All names a franchise has used across seasons, linked by ESPN team_id.
+        Owners rename teams; team_id is the stable identity."""
+        team_id = None
+        for season in self.seasons:
+            for team in self.db.get_standings(season, limit=100):
+                if team['team_name'] == team_name:
+                    team_id = team.get('team_id')
+                    break
+        if team_id is None:
+            return {team_name}
+
+        names = {team_name}
+        for season in self.seasons:
+            for team in self.db.get_standings(season, limit=100):
+                if team.get('team_id') == team_id:
+                    names.add(team['team_name'])
+        return names
+
     def get_team_stats(self, team_name: str) -> Dict[str, Any]:
         """Get all-time stats for a team across all seasons"""
         total_wins = 0
@@ -84,10 +103,13 @@ class WatsonPredictor:
                 "seasons_played": 0
             }
 
+        # Link all historical names of this franchise (owners rename teams)
+        franchise = self._franchise_names(matched_team)
+
         for season in self.seasons:
             standings = self.db.get_standings(season, limit=100)
             for team in standings:
-                if team['team_name'] == matched_team:
+                if team['team_name'] in franchise:
                     total_wins += team['wins']
                     total_losses += team['losses']
                     total_points += team['points_for']
@@ -329,15 +351,19 @@ class WatsonPredictor:
         if not actual_team1 or not actual_team2:
             return {"error": "Team not found"}
 
+        # Match across all historical names of each franchise
+        f1 = self._franchise_names(actual_team1)
+        f2 = self._franchise_names(actual_team2)
+
         h2h = []
         for season in self.seasons:
             for matchup in self.db.get_matchups(season):
-                if (matchup['home_team'] == actual_team1 and matchup['away_team'] == actual_team2) or \
-                   (matchup['home_team'] == actual_team2 and matchup['away_team'] == actual_team1):
+                if (matchup['home_team'] in f1 and matchup['away_team'] in f2) or \
+                   (matchup['home_team'] in f2 and matchup['away_team'] in f1):
                     h2h.append(matchup)
 
-        team1_wins = sum(1 for m in h2h if (m['home_team'] == actual_team1 and m['home_score'] > m['away_score']) or \
-                                           (m['away_team'] == actual_team1 and m['away_score'] > m['home_score']))
+        team1_wins = sum(1 for m in h2h if (m['home_team'] in f1 and m['home_score'] > m['away_score']) or \
+                                           (m['away_team'] in f1 and m['away_score'] > m['home_score']))
 
         return {
             "team1": actual_team1,
