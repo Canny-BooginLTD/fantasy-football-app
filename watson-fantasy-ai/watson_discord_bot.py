@@ -878,6 +878,76 @@ async def player(ctx, *, player_name: str):
         embed = discord.Embed(title="❌ Error", description=str(e), color=discord.Color.red())
         await ctx.send(embed=embed)
 
+@bot.command(name="project", help="!project <player1> vs <player2> - Compare projections with boom/bust calls")
+async def project(ctx, *, text: str):
+    """Compare player projections head-to-head with a boom or bust call for each"""
+    try:
+        # Strip filler words so "!project these players josh allen vs joe burrow" works
+        cleaned = text.lower()
+        for filler in ["these players", "the players", "players", "please", "project"]:
+            cleaned = cleaned.replace(filler, "")
+        names = [n.strip() for n in cleaned.split(" vs ") if n.strip()]
+
+        if len(names) < 2:
+            await ctx.send("Usage: `!project <player1> vs <player2>` (e.g., `!project josh allen vs joe burrow`)")
+            return
+
+        db = WatsonLeagueDB()
+        current_season = max(db.get_seasons())
+        matchups = db.get_matchups(current_season)
+        db.close()
+
+        def collect(name_lower):
+            """Gather all weekly entries for a player this season"""
+            entries = []
+            for m in matchups:
+                for p in m.get('home_players', []) + m.get('away_players', []):
+                    if name_lower in p.get('name', '').lower():
+                        entries.append(p)
+            return entries
+
+        results = []
+        for name in names:
+            entries = collect(name)
+            if not entries:
+                results.append({"name": name, "found": False})
+                continue
+            latest = entries[-1]
+            scored = [e.get('points', 0) or 0 for e in entries[:-1]]
+            avg = sum(scored) / len(scored) if scored else 0
+            proj = latest.get('projected_points', 0) or 0
+            if avg and proj >= avg * 1.1:
+                call = "💥 BOOM"
+            elif avg and proj <= avg * 0.9:
+                call = "🧨 BUST"
+            else:
+                call = "😐 PUSH"
+            results.append({
+                "name": latest.get('name'), "found": True, "position": latest.get('position'),
+                "proj": proj, "avg": avg, "call": call
+            })
+
+        embed = discord.Embed(title="🔮 Player Projection Battle", color=discord.Color.purple())
+        found = [r for r in results if r["found"]]
+        for r in results:
+            if not r["found"]:
+                embed.add_field(name=f"❓ {r['name'].title()}", value="Not found on any roster", inline=False)
+            else:
+                embed.add_field(
+                    name=f"{r['call']} — {r['name']} ({r['position']})",
+                    value=f"Projected: **{r['proj']:.1f}** | Season avg: {r['avg']:.1f}",
+                    inline=False
+                )
+        if len(found) >= 2:
+            winner = max(found, key=lambda r: r['proj'])
+            embed.add_field(name="🏆 Edge", value=f"**{winner['name']}** by projection", inline=False)
+
+        await ctx.send(embed=embed)
+
+    except Exception as e:
+        embed = discord.Embed(title="❌ Error", description=str(e), color=discord.Color.red())
+        await ctx.send(embed=embed)
+
 @bot.command(name="team_abbrev", help="Show all team abbreviations and player names")
 async def team_abbrev(ctx):
     """Show all team abbreviations and player names for quick reference"""
@@ -909,6 +979,7 @@ async def help_watson(ctx):
     embed.add_field(name="!team_abbrev", value="Show all team abbreviations", inline=False)
     embed.add_field(name="!teams", value="List all league teams", inline=False)
     embed.add_field(name="!player <name>", value="Look up player stats (e.g., !player josh allen)", inline=False)
+    embed.add_field(name="!project <p1> vs <p2>", value="Boom/bust projection battle (e.g., !project josh allen vs joe burrow)", inline=False)
     embed.add_field(name="!seasons", value="List all available seasons", inline=False)
     embed.add_field(name="!standings <year>", value="Show standings for a season (e.g., !standings 2024)", inline=False)
     embed.add_field(name="!matchups <year>", value="Show all matchups for a season (e.g., !matchups 2024)", inline=False)

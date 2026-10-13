@@ -110,6 +110,14 @@ class SleeperScraper:
             print(f"❌ Error syncing data: {e}")
             return {}
 
+    def player_compare_projection(self, player_name: str) -> float:
+        """Compare a player's projection from Sleeper with cached data"""
+        projections = self.cache.get('player_projections', {})
+        for proj_id, points in projections.items():
+            # This would need player ID mapping to name
+            pass
+        return 0.0
+
     def _calculate_team_projection(self, players: List[Dict[str, Any]], projections: Dict[str, float]) -> float:
         """Calculate team projection by summing player Sleeper projections"""
         total = 0.0
