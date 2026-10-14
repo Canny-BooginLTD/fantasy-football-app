@@ -6,12 +6,13 @@ from tinydb import TinyDB, Query
 from typing import Dict, List, Any
 from datetime import datetime
 import json
+import os
 
 class WatsonAnalysis:
     """Track prediction accuracy and improve models over time"""
 
     def __init__(self):
-        self.db_path = Path.home() / ".watson" / "analysis.json"
+        self.db_path = Path(os.getenv("WATSON_ANALYSIS_PATH", str(Path.home() / ".watson" / "analysis.json"))).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.db = TinyDB(self.db_path)
         self.predictions = self.db.table("predictions")
@@ -20,7 +21,8 @@ class WatsonAnalysis:
 
     def save_prediction(self, matchup: str, team1: str, team2: str,
                        predicted_winner: str, odds: Dict[str, Any],
-                       weighted_scores: Dict[str, float]) -> str:
+                       weighted_scores: Dict[str, float], season: int = None,
+                       week: int = None) -> str:
         """Save a prediction before the matchup happens"""
         prediction_id = f"{matchup}_{datetime.now().isoformat()}"
 
@@ -30,6 +32,8 @@ class WatsonAnalysis:
             "matchup": matchup,
             "team1": team1,
             "team2": team2,
+            "season": season,
+            "week": week,
             "predicted_winner": predicted_winner,
             "odds": odds,
             "weighted_scores": weighted_scores,
@@ -47,7 +51,9 @@ class WatsonAnalysis:
         pred = self.predictions.get(Pred.id == prediction_id)
 
         if not pred:
-            print(f"❌ Prediction {prediction_id} not found")
+            raise ValueError(f"Prediction {prediction_id} not found")
+
+        if self.results.get(Query().prediction_id == prediction_id):
             return
 
         # Determine if prediction was correct
@@ -76,7 +82,9 @@ class WatsonAnalysis:
         all_results = self.results.all()
 
         if not all_results:
-            return {"accuracy": 0, "total_predictions": 0}
+            return {"accuracy": 0, "correct": 0, "wrong": 0, "total_predictions": 0,
+                    "saved_predictions": len(self.predictions),
+                    "pending_predictions": len(self.predictions.search(Query().status == "pending"))}
 
         correct = sum(1 for r in all_results if r['prediction_correct'])
         total = len(all_results)
@@ -86,7 +94,9 @@ class WatsonAnalysis:
             "accuracy": round(accuracy, 1),
             "correct": correct,
             "total_predictions": total,
-            "wrong": total - correct
+            "wrong": total - correct,
+            "saved_predictions": len(self.predictions),
+            "pending_predictions": len(self.predictions.search(Query().status == "pending"))
         }
 
     def get_prediction_by_confidence(self) -> Dict[str, Any]:
@@ -225,4 +235,3 @@ if __name__ == "__main__":
             print(f"   {rec}")
 
     analysis.close()
-

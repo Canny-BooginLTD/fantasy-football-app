@@ -143,9 +143,15 @@ class WatsonPredictor:
 
         current_season = max(self.seasons)
         matchups = self.db.get_matchups(current_season)
+        snapshot = self.db.get_season_data(current_season) or {}
+        current_week = snapshot.get("current_week") or max(
+            (m.get("week", 0) for m in matchups), default=0
+        )
 
         current_matchup = None
         for matchup in matchups:
+            if matchup.get("week") != current_week:
+                continue
             if (matchup['home_team'] == actual_team1 and matchup['away_team'] == actual_team2) or \
                (matchup['home_team'] == actual_team2 and matchup['away_team'] == actual_team1):
                 current_matchup = matchup
@@ -156,8 +162,9 @@ class WatsonPredictor:
             return self.predict_matchup_historical_only(actual_team1, actual_team2)
 
         # Get projections from Sleeper cache (80% weight)
-        proj1 = current_matchup.get('home_projection', 0)
-        proj2 = current_matchup.get('away_projection', 0)
+        team1_home = current_matchup['home_team'] == actual_team1
+        proj1 = current_matchup.get('home_projection' if team1_home else 'away_projection', 0)
+        proj2 = current_matchup.get('away_projection' if team1_home else 'home_projection', 0)
 
         # Try to load from Sleeper cache if ESPN projections are zero
         if (proj1 == 0 or proj2 == 0) and self.sleeper_cache:
@@ -208,6 +215,8 @@ class WatsonPredictor:
 
         return {
             "matchup": f"{actual_team1} vs {actual_team2}",
+            "season": current_season,
+            "week": current_week,
             "predicted_winner": winner,
             "implied_probability_pct": round(max(prob1, prob2) * 100, 1),
             "moneyline_odds": {
@@ -404,4 +413,3 @@ class WatsonPredictor:
 
     def close(self):
         self.db.close()
-

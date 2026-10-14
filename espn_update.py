@@ -32,7 +32,7 @@ def _lineup(players):
     ]
 
 
-def update_season(year: int) -> dict:
+def fetch_season(year: int) -> dict:
     league = League(
         league_id=LEAGUE_ID,
         year=year,
@@ -40,6 +40,8 @@ def update_season(year: int) -> dict:
         swid=os.getenv("SWID") or None,
     )
     week = league.current_week
+    scoring_period = getattr(league, "scoringPeriodId", week)
+    matchup_periods = getattr(getattr(league, "settings", None), "matchup_periods", {})
 
     standings = [
         {
@@ -54,9 +56,11 @@ def update_season(year: int) -> dict:
 
     matchups = []
     for w in range(1, week + 1):
+        period_end = next((max(period) for period in matchup_periods.values() if w in period), w)
         for game in league.box_scores(week=w):
             matchups.append({
                 "week": w,
+                "completed": period_end < scoring_period,
                 "home_team": getattr(game.home_team, "team_name", None),
                 "home_score": game.home_score,
                 "home_projection": getattr(game, "home_projected", 0),
@@ -70,17 +74,25 @@ def update_season(year: int) -> dict:
     snapshot = {
         "league_id": str(LEAGUE_ID),
         "season": year,
+        "current_week": week,
         "standings": standings,
         "matchups": matchups,
         "source": "espn-api-live",
     }
 
-    db = TinyDB(DB_PATH)
-    snaps = db.table("snapshots")
-    Snap = Query()
-    snaps.upsert(snapshot, Snap.season == year)
-    db.close()
-    return {"season": year, "week": week, "matchups": len(matchups)}
+    return snapshot
+
+
+def store_season(snapshot: dict) -> dict:
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with TinyDB(DB_PATH) as db:
+        db.table("snapshots").upsert(snapshot, Query().season == snapshot["season"])
+    return {"season": snapshot["season"], "week": snapshot["current_week"],
+            "matchups": len(snapshot["matchups"])}
+
+
+def update_season(year: int) -> dict:
+    return store_season(fetch_season(year))
 
 
 if __name__ == "__main__":
