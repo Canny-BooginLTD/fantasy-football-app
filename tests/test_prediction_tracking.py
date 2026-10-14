@@ -79,16 +79,16 @@ class PredictionTrackingTests(unittest.TestCase):
     def test_week_six_catches_up_all_five_weeks_and_is_idempotent(self):
         for week in range(1, 7):
             self.save(week)
-        self.save(5)  # Multiple saved predictions for one matchup must all grade.
+        self.save(5)  # Duplicate save dedupes into the existing week-5 prediction.
         self.save(5, season=2025)
-        self.assertEqual(self.sync()["newly_recorded"], 6)
+        self.assertEqual(self.sync()["newly_recorded"], 5)
         self.assertEqual(self.sync()["newly_recorded"], 0)
         analysis = WatsonAnalysis()
         try:
             accuracy = analysis.get_prediction_accuracy()
-            self.assertEqual(accuracy["total_predictions"], 6)
+            self.assertEqual(accuracy["total_predictions"], 5)
             self.assertEqual(accuracy["accuracy"], 100)
-            self.assertEqual(accuracy["saved_predictions"], 8)
+            self.assertEqual(accuracy["saved_predictions"], 7)
             self.assertEqual(accuracy["pending_predictions"], 2)
         finally:
             analysis.close()
@@ -256,7 +256,8 @@ class PredictionTrackingTests(unittest.TestCase):
                     asyncio.run(callback(ctx, teams="Home vs Away"))
         analysis = WatsonAnalysis()
         try:
-            self.assertEqual(len(analysis.predictions), 3)
+            # All three commands dedupe into one prediction per matchup/week
+            self.assertEqual(len(analysis.predictions), 1)
             self.assertTrue(all(p["season"] == 2026 and p["week"] == 6
                                 for p in analysis.predictions.all()))
         finally:
@@ -339,6 +340,33 @@ class PredictionTrackingTests(unittest.TestCase):
         self.assertNotIn("Error", embed.title)
         self.assertIn("100.0%", fields["Overall Accuracy"])
         self.assertIn("0/0", fields["Medium Confidence (45-55%)"])
+
+    def test_repeat_saves_update_single_prediction_per_matchup_week(self):
+        first_id = self.save(6)
+        second_id = self.save(6)
+        reversed_id = self.save(6, reverse=True)
+        other_week_id = self.save(5)
+        unscoped_id = self.save(None, season=None)
+        self.assertEqual(first_id, second_id)
+        self.assertEqual(first_id, reversed_id)
+        self.assertNotEqual(first_id, other_week_id)
+        analysis = WatsonAnalysis()
+        try:
+            self.assertEqual(len(analysis.predictions), 3)
+            kept = analysis.predictions.get(Query().id == first_id)
+            self.assertEqual(kept["predicted_winner"], "Home")
+            # Unscoped predictions never dedupe (no reliable identity)
+            self.assertIsNotNone(analysis.predictions.get(Query().id == unscoped_id))
+        finally:
+            analysis.close()
+        # Graded predictions are left alone; a new save creates a new pending one
+        analysis = WatsonAnalysis()
+        try:
+            analysis.record_result(first_id, "Home", 120, 100)
+        finally:
+            analysis.close()
+        fresh_id = self.save(6)
+        self.assertNotEqual(fresh_id, first_id)
 
 
 if __name__ == "__main__":
