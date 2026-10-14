@@ -831,6 +831,28 @@ async def pending_predictions(ctx, page: int = 1):
     await ctx.send(embed=embed)
 
 
+@bot.command(name="backfill_predictions", help="!backfill_predictions [season] - Auto-link older predictions, then grade")
+async def backfill_predictions(ctx, season: int = None):
+    season = season if season is not None else _active_season()
+    scraper = WatsonResultScraper()
+    try:
+        backfill = scraper.backfill_predictions(season)
+    finally:
+        scraper.close()
+    summary = await _refresh_and_grade(season)
+    embed = discord.Embed(title="🔗 Prediction Backfill", color=discord.Color.green())
+    embed.add_field(name="Auto-Linked", value=f"{backfill['linked']} predictions", inline=True)
+    embed.add_field(name="Newly Graded", value=f"{summary['newly_recorded']} results", inline=True)
+    if backfill["ambiguous"]:
+        ids = "\n".join(f"`{i}`" for i in backfill["ambiguous"][:5])
+        embed.add_field(name=f"Still Ambiguous ({len(backfill['ambiguous'])})",
+                        value=f"{ids}\nUse !link_prediction <id> <season> <week>"[:1024], inline=False)
+    if backfill["no_schedule_match"]:
+        embed.add_field(name=f"No Schedule Match ({len(backfill['no_schedule_match'])})",
+                        value="Hypothetical matchups; these are never graded.", inline=False)
+    await ctx.send(embed=embed)
+
+
 @bot.command(name="link_prediction", help="!link_prediction <id> <season> <week> - Scope an older prediction")
 async def link_prediction(ctx, prediction_id: str, season: int, week: int):
     scraper = WatsonResultScraper()
@@ -1087,6 +1109,7 @@ async def help_watson(ctx):
     embed.add_field(name="!record_result <pred_id> <winner> <score1> <score2>", value="Log actual matchup result", inline=False)
     embed.add_field(name="Prediction Tracking",
                     value="!sync_results [season] — grade finalized weeks\n"
+                    "!backfill_predictions [season] — auto-link older predictions, then grade\n"
                     "!pending_predictions [page] — list saved IDs\n"
                     "!link_prediction <id> <season> <week> — scope older predictions",
                     inline=False)

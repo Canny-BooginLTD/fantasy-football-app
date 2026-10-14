@@ -5,6 +5,7 @@ from watson_query import WatsonLeagueDB
 from watson_analysis import WatsonAnalysis
 from tinydb import Query
 from typing import List, Dict, Any
+from datetime import datetime
 
 
 class WatsonResultScraper:
@@ -43,6 +44,67 @@ class WatsonResultScraper:
         self.analysis.predictions.update(
             {"season": season, "week": week}, Query().id == prediction_id
         )
+
+    def backfill_predictions(self, season: int) -> Dict[str, Any]:
+        """Bulk-link unscoped pending predictions to season/week automatically.
+
+        A prediction whose team pair plays only one week that season links
+        directly. Repeat matchups are resolved by comparing the prediction's
+        timestamp against already-scoped predictions (7-day week spacing);
+        anything still ambiguous is left for !link_prediction.
+        """
+        summary = {"season": season, "linked": 0, "ambiguous": [], "no_schedule_match": []}
+        matchups = self.db.get_matchups(season)
+
+        def candidate_weeks(pred):
+            return sorted({
+                m["week"] for m in matchups
+                if m.get("week") is not None and self._teams_match(pred, m)
+            })
+
+        predictions = self.analysis.predictions.all()
+        unscoped = [
+            p for p in predictions
+            if p.get("status") == "pending"
+            and (p.get("season") is None or p.get("week") is None)
+        ]
+        # Timestamp anchors from predictions whose week is known
+        anchors = [
+            (datetime.fromisoformat(p["timestamp"]), p["week"])
+            for p in predictions
+            if p.get("season") == season and p.get("week") is not None and p.get("timestamp")
+        ]
+
+        def link(pred, week):
+            self.analysis.predictions.update(
+                {"season": season, "week": week}, Query().id == pred["id"]
+            )
+            anchors.append((datetime.fromisoformat(pred["timestamp"]), week))
+            summary["linked"] += 1
+
+        # Unique schedule matches first; they also become timestamp anchors.
+        deferred = []
+        for pred in unscoped:
+            weeks = candidate_weeks(pred)
+            if len(weeks) == 1:
+                link(pred, weeks[0])
+            elif not weeks:
+                summary["no_schedule_match"].append(pred["id"])
+            else:
+                deferred.append((pred, weeks))
+
+        for pred, weeks in deferred:
+            ts = datetime.fromisoformat(pred["timestamp"])
+            inferred = {
+                anchor_week + round((ts - anchor_ts).days / 7)
+                for anchor_ts, anchor_week in anchors
+            }
+            matched = inferred & set(weeks)
+            if len(matched) == 1:
+                link(pred, matched.pop())
+            else:
+                summary["ambiguous"].append(pred["id"])
+        return summary
 
     def sync_results(self, season: int) -> Dict[str, Any]:
         """Catch up every finalized week, grading each scoped prediction once."""

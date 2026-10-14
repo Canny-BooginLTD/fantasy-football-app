@@ -35,7 +35,9 @@ Self-contained Discord bot. Upload this folder only.
   `!prediction_accuracy`.
 - `!sync_results [season]` refreshes ESPN and performs the same catch-up on
   **any day**, without duplicating recorded results.
-- Older predictions have no saved season/week. Use `!pending_predictions [page]`
+- Older predictions have no saved season/week. Run `!backfill_predictions` to
+  auto-link them (unique matchups directly; repeat matchups by timestamp) and
+  grade in one step. Anything it reports as ambiguous: `!pending_predictions [page]`
   to find IDs, then `!link_prediction "<prediction_id>" 2026 5` (substitute the
   actual season/week), then `!sync_results 2026`. Quote IDs containing spaces.
   Team names alone are not safe for backfilling repeat matchups.
