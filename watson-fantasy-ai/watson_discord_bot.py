@@ -2,7 +2,7 @@
 """Watson Fantasy Football Discord Bot"""
 
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from watson_query import WatsonLeagueDB
 from watson_predictor import WatsonPredictor
 from watson_analysis import WatsonAnalysis
@@ -12,6 +12,10 @@ from team_abbrev import get_abbreviation, get_team_name, list_all_abbreviations,
 import os
 from dotenv import load_dotenv
 import time
+import asyncio
+import logging
+from datetime import datetime
+from espn_update import fetch_season, store_season
 
 # Load environment variables
 load_dotenv()
@@ -35,12 +39,58 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = False
 bot = commands.Bot(command_prefix="!", intents=intents)
+_sync_lock = asyncio.Lock()
+_last_result_sync_error = None
+
+
+def _active_season():
+    today = datetime.now()
+    return int(os.getenv("WATSON_SEASON", str(today.year if today.month >= 8 else today.year - 1)))
+
+
+async def _refresh_and_grade(season):
+    async with _sync_lock:
+        snapshot = await asyncio.to_thread(fetch_season, season)
+        store_season(snapshot)
+        scraper = WatsonResultScraper()
+        try:
+            return scraper.sync_results(season)
+        finally:
+            scraper.close()
+
+
+@tasks.loop(hours=6)
+async def automatic_result_sync():
+    global _last_result_sync_error
+    analysis = WatsonAnalysis()
+    try:
+        seasons = {
+            p["season"] for p in analysis.predictions.all()
+            if p.get("status") == "pending" and p.get("season") is not None
+        }
+    finally:
+        analysis.close()
+    seasons.add(_active_season())
+    errors = []
+    for season in sorted(seasons):
+        try:
+            summary = await _refresh_and_grade(season)
+            logging.info("Prediction result sync: %s", summary)
+            if summary["unscoped_predictions"]:
+                logging.warning("%s pending predictions need !link_prediction before grading",
+                                summary["unscoped_predictions"])
+        except Exception as exc:
+            logging.exception("Automatic prediction result sync failed for %s", season)
+            errors.append(f"{season}: {exc}")
+    _last_result_sync_error = "; ".join(errors) or None
 
 @bot.event
 async def on_ready():
     print(f"✅ {bot.user} is now running!")
     print(f"Connected to Discord")
     await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name="fantasy football"))
+    if not automatic_result_sync.is_running():
+        automatic_result_sync.start()
 
 # Track if bot is already connected to prevent double execution
 _bot_ready = False
@@ -72,6 +122,9 @@ async def all_odds(ctx):
         db = WatsonLeagueDB()
         current_season = max(db.get_seasons())
         matchups = db.get_matchups(current_season)
+        snapshot = db.get_season_data(current_season) or {}
+        week = snapshot.get("current_week") or max((m.get("week", 0) for m in matchups), default=0)
+        matchups = [m for m in matchups if m.get("week") == week]
         db.close()
 
         predictor = WatsonPredictor()
@@ -107,7 +160,8 @@ async def all_odds(ctx):
                 {
                     "team1": prediction['team1']['weighted_score'],
                     "team2": prediction['team2']['weighted_score']
-                }
+                },
+                season=prediction.get("season"), week=prediction.get("week")
             )
 
             ml = prediction['moneyline_odds']
@@ -333,7 +387,8 @@ async def predict_current(ctx, *, teams: str):
                 prediction['team2']['name'],
                 prediction['predicted_winner'],
                 prediction['moneyline_odds'],
-                {"team1": prediction['team1']['weighted_score'], "team2": prediction['team2']['weighted_score']}
+                {"team1": prediction['team1']['weighted_score'], "team2": prediction['team2']['weighted_score']},
+                season=prediction.get("season"), week=prediction.get("week")
             )
 
             ml = prediction['moneyline_odds']
@@ -598,7 +653,8 @@ async def save_prediction(ctx, *, teams: str = None):
             {
                 "team1": prediction['team1']['weighted_score'],
                 "team2": prediction['team2']['weighted_score']
-            }
+            },
+            season=prediction.get("season"), week=prediction.get("week")
         )
         analysis.close()
 
@@ -690,32 +746,15 @@ async def refresh_projections(ctx, week: str = None):
         embed = discord.Embed(title="❌ Error", description=str(e), color=discord.Color.red())
         await ctx.send(embed=embed)
 
-@bot.command(name="sync_results", help="Auto-sync completed matchup results (Mondays only)")
-async def sync_results(ctx):
-    """Automatically scan for completed matchups and record results.
-    Only runs on Mondays after league week completes (Thu-Mon schedule)."""
+@bot.command(name="sync_results", help="!sync_results [season] - Refresh ESPN and grade all finalized weeks")
+async def sync_results(ctx, season: int = None):
+    """Refresh official scores and catch up all finalized weeks on any day."""
     try:
-        from datetime import datetime
-
-        # Check if today is Monday (weekday() returns 0 for Monday)
-        today = datetime.now()
-        if today.weekday() != 0:  # 0 = Monday
-            day_name = today.strftime("%A")
-            embed = discord.Embed(
-                title="⏰ Not Yet",
-                description=f"Today is {day_name}. Results can only be synced on **Monday** after the league week ends.\n\nCome back Monday night!",
-                color=discord.Color.orange()
-            )
-            await ctx.send(embed=embed)
-            return
-
-        scraper = WatsonResultScraper()
-        summary = scraper.sync_results(2026)
-        scraper.close()
+        summary = await _refresh_and_grade(season if season is not None else _active_season())
 
         embed = discord.Embed(
             title="📊 Weekly Results Sync",
-            description=f"Season {summary['season']} - Monday Night Results",
+            description=f"Season {summary['season']} - All Finalized Weeks",
             color=discord.Color.green()
         )
 
@@ -723,14 +762,19 @@ async def sync_results(ctx):
         embed.add_field(name="Newly Recorded", value=f"{summary['newly_recorded']} results", inline=True)
         embed.add_field(name="Already Graded", value=f"{summary['already_graded']}", inline=True)
         embed.add_field(name="No Prediction Found", value=f"{summary['no_prediction_found']}", inline=True)
+        if summary["unscoped_predictions"]:
+            embed.add_field(name="Older Predictions Need a Week",
+                            value=f"{summary['unscoped_predictions']} pending predictions have no saved season/week. "
+                            "Use !pending_predictions, then !link_prediction <id> <season> <week>.",
+                            inline=False)
 
         if summary['results']:
             results_text = ""
-            for result in summary['results']:
+            for result in summary['results'][:5]:
                 status = "✅" if result['correct'] else "❌"
                 results_text += f"{status} {result['matchup']}\n"
                 results_text += f"   Pred: {result['predicted_winner']} | Actual: {result['actual_winner']} ({result['scores']})\n"
-            embed.add_field(name="Newly Recorded", value=results_text, inline=False)
+            embed.add_field(name="Newly Recorded (first 5)", value=results_text[:1024], inline=False)
         else:
             embed.add_field(name="Status", value="No new results to record", inline=False)
 
@@ -744,11 +788,10 @@ async def sync_results(ctx):
 async def sync_espn(ctx, year: int = 2026):
     """Refresh actual scores, player points, and standings from ESPN"""
     try:
-        import asyncio
-        from espn_update import update_season
-
         msg = await ctx.send(f"📡 Pulling live ESPN data for season {year}...")
-        result = await asyncio.to_thread(update_season, year)
+        async with _sync_lock:
+            snapshot = await asyncio.to_thread(fetch_season, year)
+            result = store_season(snapshot)
 
         embed = discord.Embed(
             title="✅ ESPN Sync Complete",
@@ -761,6 +804,42 @@ async def sync_espn(ctx, year: int = 2026):
     except Exception as e:
         embed = discord.Embed(title="❌ Error", description=str(e), color=discord.Color.red())
         await ctx.send(embed=embed)
+
+@bot.command(name="pending_predictions", help="!pending_predictions [page] - List ungraded predictions")
+async def pending_predictions(ctx, page: int = 1):
+    if page < 1:
+        raise commands.BadArgument("Page must be at least 1")
+    analysis = WatsonAnalysis()
+    try:
+        predictions = [p for p in analysis.predictions.all() if p.get("status") == "pending"]
+    finally:
+        analysis.close()
+    pages = max(1, (len(predictions) + 4) // 5)
+    if page > pages:
+        raise commands.BadArgument(f"Only {pages} pages of pending predictions")
+    embed = discord.Embed(title="Pending Predictions", color=discord.Color.blue())
+    for pred in predictions[(page - 1) * 5:page * 5]:
+        embed.add_field(
+            name=pred["matchup"][:256],
+            value=f"ID: `{pred['id']}`\nSaved: {pred['timestamp']}\n"
+                  f"Season: {pred.get('season')} | Week: {pred.get('week')}",
+            inline=False
+        )
+    if not predictions:
+        embed.description = "No pending predictions saved."
+    embed.set_footer(text=f"Page {page}/{pages} | !link_prediction <id> <season> <week>")
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="link_prediction", help="!link_prediction <id> <season> <week> - Scope an older prediction")
+async def link_prediction(ctx, prediction_id: str, season: int, week: int):
+    scraper = WatsonResultScraper()
+    try:
+        scraper.link_prediction(prediction_id, season, week)
+    finally:
+        scraper.close()
+    await ctx.send(f"Prediction linked to season {season}, week {week}. Run !sync_results {season} to grade finalized results.")
+
 
 @bot.command(name="prediction_accuracy", help="Show overall prediction accuracy")
 async def prediction_accuracy(ctx):
@@ -776,9 +855,18 @@ async def prediction_accuracy(ctx):
             title="📊 Prediction Analysis",
             color=discord.Color.blue()
         )
+        embed.add_field(name="Saved / Pending",
+                        value=f"{accuracy['saved_predictions']} saved / {accuracy['pending_predictions']} pending",
+                        inline=False)
+        if _last_result_sync_error:
+            embed.add_field(name="Automatic Sync Failed",
+                            value=_last_result_sync_error[:1024], inline=False)
 
         if accuracy['total_predictions'] == 0:
-            embed.add_field(name="No Data", value="No predictions recorded yet. Use !save_prediction to start tracking.", inline=False)
+            embed.add_field(name="No Graded Results",
+                            value="Predictions are saved by !predict_current. Accuracy appears after finalized "
+                            "results are recorded. Run !sync_results to catch up; older predictions may need !link_prediction.",
+                            inline=False)
             await ctx.send(embed=embed)
             return
 
@@ -997,6 +1085,11 @@ async def help_watson(ctx):
     embed.add_field(name="📈 Analysis & Learning Commands", value="", inline=False)
     embed.add_field(name="!save_prediction <team1> vs <team2>", value="Save a prediction for accuracy tracking", inline=False)
     embed.add_field(name="!record_result <pred_id> <winner> <score1> <score2>", value="Log actual matchup result", inline=False)
+    embed.add_field(name="Prediction Tracking",
+                    value="!sync_results [season] — grade finalized weeks\n"
+                    "!pending_predictions [page] — list saved IDs\n"
+                    "!link_prediction <id> <season> <week> — scope older predictions",
+                    inline=False)
     embed.add_field(name="!prediction_accuracy", value="Show prediction accuracy and improvement recommendations", inline=False)
 
     await ctx.send(embed=embed)
@@ -1009,4 +1102,3 @@ if __name__ == "__main__":
 
     print("🏈 Starting Watson Fantasy Football Discord Bot...")
     bot.run(DISCORD_TOKEN)
-

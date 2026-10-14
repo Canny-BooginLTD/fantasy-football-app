@@ -1,103 +1,95 @@
 #!/usr/bin/env python3
-"""Watson Result Scraper - Auto-record completed matchup results"""
+"""Grade saved predictions against finalized ESPN matchups."""
 
 from watson_query import WatsonLeagueDB
 from watson_analysis import WatsonAnalysis
+from tinydb import Query
 from typing import List, Dict, Any
-from datetime import datetime
+
 
 class WatsonResultScraper:
-    """Automatically scrape and record completed matchup results"""
-
     def __init__(self):
         self.db = WatsonLeagueDB()
         self.analysis = WatsonAnalysis()
 
     def get_completed_matchups(self, season: int) -> List[Dict[str, Any]]:
-        """Get all completed matchups for a season"""
-        matchups = self.db.get_matchups(season)
-        completed = []
+        return [
+            matchup for matchup in self.db.get_matchups(season)
+            if matchup.get("completed") is True
+            and matchup.get("home_team") and matchup.get("away_team")
+            and isinstance(matchup.get("home_score"), (int, float))
+            and isinstance(matchup.get("away_score"), (int, float))
+        ]
 
-        for matchup in matchups:
-            # Matchup is completed if both teams have scores > 0
-            if matchup.get('home_score', 0) > 0 and matchup.get('away_score', 0) > 0:
-                completed.append(matchup)
-
-        return completed
-
-    def find_prediction_for_matchup(self, home_team: str, away_team: str) -> Dict[str, Any]:
-        """Find a saved prediction matching this matchup"""
-        predictions = self.analysis.predictions.all()
-
-        for pred in predictions:
-            # Check if prediction matches this matchup
-            matchup_str = pred.get('matchup', '').lower()
-            home_lower = home_team.lower()
-            away_lower = away_team.lower()
-
-            if (home_lower in matchup_str and away_lower in matchup_str) or \
-               (away_lower in matchup_str and home_lower in matchup_str):
-                return pred
-
-        return None
-
-    def sync_results(self, season: int) -> Dict[str, Any]:
-        """Scan completed matchups and record results for ungraded predictions"""
-        completed_matchups = self.get_completed_matchups(season)
-
-        summary = {
-            "season": season,
-            "processed": 0,
-            "already_graded": 0,
-            "newly_recorded": 0,
-            "no_prediction_found": 0,
-            "results": []
+    @staticmethod
+    def _teams_match(prediction, matchup):
+        return {prediction["team1"].casefold(), prediction["team2"].casefold()} == {
+            matchup["home_team"].casefold(), matchup["away_team"].casefold()
         }
 
-        for matchup in completed_matchups:
-            home_team = matchup['home_team']
-            away_team = matchup['away_team']
-            home_score = matchup['home_score']
-            away_score = matchup['away_score']
+    def link_prediction(self, prediction_id: str, season: int, week: int):
+        """Explicitly scope an older prediction whose week was never saved."""
+        pred = self.analysis.predictions.get(Query().id == prediction_id)
+        if not pred:
+            raise ValueError(f"Prediction {prediction_id} not found")
+        if pred["status"] != "pending":
+            raise ValueError("Only pending predictions can be linked")
+        candidates = [
+            m for m in self.db.get_matchups(season)
+            if m.get("week") == week and self._teams_match(pred, m)
+        ]
+        if len(candidates) != 1:
+            raise ValueError("No unique ESPN matchup for these teams in that season/week. Run !sync first.")
+        self.analysis.predictions.update(
+            {"season": season, "week": week}, Query().id == prediction_id
+        )
 
-            # Determine actual winner
-            actual_winner = home_team if home_score > away_score else away_team
-
-            # Find prediction for this matchup
-            prediction = self.find_prediction_for_matchup(home_team, away_team)
-
+    def sync_results(self, season: int) -> Dict[str, Any]:
+        """Catch up every finalized week, grading each scoped prediction once."""
+        summary = {
+            "season": season, "processed": 0, "already_graded": 0,
+            "newly_recorded": 0, "no_prediction_found": 0,
+            "unscoped_predictions": 0, "results": []
+        }
+        predictions = self.analysis.predictions.all()
+        summary["unscoped_predictions"] = sum(
+            p.get("status") == "pending" and
+            (p.get("season") is None or p.get("week") is None)
+            for p in predictions
+        )
+        for matchup in self.get_completed_matchups(season):
             summary["processed"] += 1
-
-            if not prediction:
+            matches = [
+                p for p in predictions
+                if p.get("season") == season and p.get("week") == matchup.get("week")
+                and self._teams_match(p, matchup)
+            ]
+            if not matches:
                 summary["no_prediction_found"] += 1
-                continue
-
-            pred_id = prediction.get('id')
-            pred_status = prediction.get('status', 'pending')
-
-            # Check if already recorded
-            if pred_status == 'completed':
-                summary["already_graded"] += 1
-                continue
-
-            # Record the result
-            self.analysis.record_result(
-                pred_id,
-                actual_winner,
-                home_score,
-                away_score
-            )
-
-            summary["newly_recorded"] += 1
-            summary["results"].append({
-                "prediction_id": pred_id,
-                "matchup": f"{home_team} vs {away_team}",
-                "predicted_winner": prediction.get('predicted_winner'),
-                "actual_winner": actual_winner,
-                "correct": prediction.get('predicted_winner') == actual_winner,
-                "scores": f"{home_score} - {away_score}"
-            })
-
+            for prediction in matches:
+                if prediction.get("status") == "completed":
+                    summary["already_graded"] += 1
+                    continue
+                home_score, away_score = matchup["home_score"], matchup["away_score"]
+                actual_winner = (
+                    "TIE" if home_score == away_score else
+                    matchup["home_team"] if home_score > away_score else matchup["away_team"]
+                )
+                home_first = prediction["team1"].casefold() == matchup["home_team"].casefold()
+                self.analysis.record_result(
+                    prediction["id"], actual_winner,
+                    home_score if home_first else away_score,
+                    away_score if home_first else home_score
+                )
+                summary["newly_recorded"] += 1
+                summary["results"].append({
+                    "prediction_id": prediction["id"],
+                    "matchup": f"Week {matchup['week']}: {prediction['matchup']}",
+                    "predicted_winner": prediction["predicted_winner"],
+                    "actual_winner": actual_winner,
+                    "correct": prediction["predicted_winner"] == actual_winner,
+                    "scores": f"{home_score} - {away_score}"
+                })
         return summary
 
     def close(self):
@@ -106,27 +98,17 @@ class WatsonResultScraper:
 
 
 if __name__ == "__main__":
+    import argparse
+    import json
+    from datetime import datetime
+    from espn_update import update_season
+
+    parser = argparse.ArgumentParser(description="Refresh ESPN and grade finalized predictions")
+    parser.add_argument("season", type=int, nargs="?", default=datetime.now().year)
+    season = parser.parse_args().season
+    update_season(season)
     scraper = WatsonResultScraper()
-
-    print("\n" + "="*80)
-    print("WATSON RESULT SCRAPER")
-    print("="*80 + "\n")
-
-    current_season = 2026
-    summary = scraper.sync_results(current_season)
-
-    print(f"Season {summary['season']} Sync Results:")
-    print(f"  Processed: {summary['processed']} matchups")
-    print(f"  Already Graded: {summary['already_graded']}")
-    print(f"  Newly Recorded: {summary['newly_recorded']}")
-    print(f"  No Prediction Found: {summary['no_prediction_found']}")
-
-    if summary['results']:
-        print(f"\nNewly Recorded Results:")
-        for result in summary['results']:
-            status = "✅ CORRECT" if result['correct'] else "❌ WRONG"
-            print(f"  {status} - {result['matchup']}")
-            print(f"    Predicted: {result['predicted_winner']}, Actual: {result['actual_winner']}, Score: {result['scores']}")
-
-    scraper.close()
-
+    try:
+        print(json.dumps(scraper.sync_results(season), indent=2))
+    finally:
+        scraper.close()
