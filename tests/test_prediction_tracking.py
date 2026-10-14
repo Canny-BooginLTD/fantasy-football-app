@@ -262,6 +262,69 @@ class PredictionTrackingTests(unittest.TestCase):
         finally:
             analysis.close()
 
+    def test_backfill_links_unique_and_timestamp_resolved_matchups(self):
+        # Weeks 1-6 all Home vs Away: pair repeats, so unique-match cannot apply.
+        # Add a distinct pair in week 2 to create an anchorable unique link.
+        matchups = self.matchups + [{
+            "week": 2, "home_team": "Third", "away_team": "Fourth",
+            "home_score": 90, "away_score": 80,
+            "home_projection": 100, "away_projection": 95, "completed": True,
+        }]
+        self.store(matchups)
+        analysis = WatsonAnalysis()
+        try:
+            def save_unscoped(team1, team2, ts):
+                pid = analysis.save_prediction(
+                    f"{team1} vs {team2}", team1, team2, team1,
+                    {"team1": {"probability": 60}, "team2": {"probability": 40}},
+                    {"team1": 120, "team2": 100})
+                analysis.predictions.update({"timestamp": ts}, Query().id == pid)
+                return pid
+
+            unique_id = save_unscoped("Third", "Fourth", "2026-09-16T12:00:00")
+            # Same calendar week as the unique anchor -> inferred week 2
+            repeat_id = save_unscoped("Home", "Away", "2026-09-17T12:00:00")
+            # 21 days later -> week 5
+            later_id = save_unscoped("Home", "Away", "2026-10-08T12:00:00")
+            hypothetical_id = save_unscoped("Home", "Nobody", "2026-09-16T12:00:00")
+        finally:
+            analysis.close()
+
+        scraper = WatsonResultScraper()
+        try:
+            summary = scraper.backfill_predictions(2026)
+        finally:
+            scraper.close()
+        self.assertEqual(summary["linked"], 3)
+        self.assertEqual(summary["no_schedule_match"], [hypothetical_id])
+        self.assertEqual(summary["ambiguous"], [])
+        analysis = WatsonAnalysis()
+        try:
+            weeks = {p["id"]: p.get("week") for p in analysis.predictions.all()}
+        finally:
+            analysis.close()
+        self.assertEqual(weeks[unique_id], 2)
+        self.assertEqual(weeks[repeat_id], 2)
+        self.assertEqual(weeks[later_id], 5)
+        self.assertEqual(self.sync()["newly_recorded"], 3)
+
+    def test_backfill_without_anchors_reports_repeat_matchups_ambiguous(self):
+        analysis = WatsonAnalysis()
+        try:
+            pid = analysis.save_prediction(
+                "Home vs Away", "Home", "Away", "Home",
+                {"team1": {"probability": 60}, "team2": {"probability": 40}},
+                {"team1": 120, "team2": 100})
+        finally:
+            analysis.close()
+        scraper = WatsonResultScraper()
+        try:
+            summary = scraper.backfill_predictions(2026)
+        finally:
+            scraper.close()
+        self.assertEqual(summary["linked"], 0)
+        self.assertEqual(summary["ambiguous"], [pid])
+
 
 if __name__ == "__main__":
     unittest.main()
