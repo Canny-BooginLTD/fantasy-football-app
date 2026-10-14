@@ -325,6 +325,21 @@ class PredictionTrackingTests(unittest.TestCase):
         self.assertEqual(summary["linked"], 0)
         self.assertEqual(summary["ambiguous"], [pid])
 
+    def test_accuracy_command_with_graded_results_in_one_confidence_bucket(self):
+        pred_id = self.save(1)
+        analysis = WatsonAnalysis()
+        try:
+            analysis.record_result(pred_id, "Home", 120, 100)
+        finally:
+            analysis.close()
+        ctx = SimpleNamespace(send=AsyncMock())
+        asyncio.run(self.bot_module.prediction_accuracy.callback(ctx))
+        embed = ctx.send.call_args.kwargs["embed"]
+        fields = {f.name: f.value for f in embed.fields}
+        self.assertNotIn("Error", embed.title)
+        self.assertIn("100.0%", fields["Overall Accuracy"])
+        self.assertIn("0/0", fields["Medium Confidence (45-55%)"])
+
 
 if __name__ == "__main__":
     unittest.main()

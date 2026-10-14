@@ -110,7 +110,7 @@ class WatsonAnalysis:
 
         def calc_accuracy(group):
             if not group:
-                return {"accuracy": 0, "total": 0}
+                return {"accuracy": 0, "correct": 0, "total": 0}
             correct = sum(1 for r in group if r['prediction_correct'])
             total = len(group)
             return {
