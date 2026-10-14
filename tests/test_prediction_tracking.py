@@ -368,6 +368,66 @@ class PredictionTrackingTests(unittest.TestCase):
         fresh_id = self.save(6)
         self.assertNotEqual(fresh_id, first_id)
 
+    def test_fetch_includes_free_agents_and_survives_fa_failure(self):
+        game = SimpleNamespace(
+            home_team=SimpleNamespace(team_name="Home"),
+            away_team=SimpleNamespace(team_name="Away"),
+            home_score=120, away_score=100,
+        )
+        fa = SimpleNamespace(name="Waiver RB", position="RB", proTeam="KC",
+                             injuryStatus="ACTIVE", points=8.0, projected_points=14.5)
+        league = SimpleNamespace(
+            current_week=6, standings=lambda: [],
+            box_scores=lambda week: [game],
+            free_agents=lambda week, size: [fa],
+        )
+        with patch.object(espn_update, "League", return_value=league):
+            snapshot = espn_update.fetch_season(2026)
+        self.assertEqual(snapshot["available_players"],
+                         [{"name": "Waiver RB", "position": "RB", "pro_team": "KC",
+                           "injury_status": "ACTIVE", "points": 8.0, "projected_points": 14.5}])
+
+        def boom(week, size):
+            raise RuntimeError("FA endpoint down")
+        league.free_agents = boom
+        with patch.object(espn_update, "League", return_value=league):
+            snapshot = espn_update.fetch_season(2026)
+        self.assertEqual(snapshot["available_players"], [])
+        self.assertEqual(len(snapshot["matchups"]), 6)
+
+    def test_waivers_command_filters_sorts_and_handles_missing_data(self):
+        espn_update.store_season({
+            "season": 2026, "current_week": 6, "standings": [],
+            "matchups": self.matchups,
+            "available_players": [
+                {"name": "Bench QB", "position": "QB", "pro_team": "NYJ",
+                 "injury_status": "QUESTIONABLE", "points": 0, "projected_points": 17.2},
+                {"name": "Hot RB", "position": "RB", "pro_team": "KC",
+                 "injury_status": "ACTIVE", "points": 12, "projected_points": 14.5},
+                {"name": "Deep WR", "position": "WR", "pro_team": "MIA",
+                 "injury_status": None, "points": 3, "projected_points": 9.1},
+            ],
+        })
+        ctx = SimpleNamespace(send=AsyncMock())
+        asyncio.run(self.bot_module.waivers.callback(ctx))
+        value = ctx.send.call_args.kwargs["embed"].fields[0].value
+        self.assertLess(value.index("Bench QB"), value.index("Hot RB"))
+        self.assertIn("🩹QUESTIONABLE", value)
+
+        ctx = SimpleNamespace(send=AsyncMock())
+        asyncio.run(self.bot_module.waivers.callback(ctx, position="rb"))
+        value = ctx.send.call_args.kwargs["embed"].fields[0].value
+        self.assertIn("Hot RB", value)
+        self.assertNotIn("Bench QB", value)
+
+        espn_update.store_season({
+            "season": 2026, "current_week": 6, "standings": [],
+            "matchups": self.matchups, "available_players": [],
+        })
+        ctx = SimpleNamespace(send=AsyncMock())
+        asyncio.run(self.bot_module.waivers.callback(ctx))
+        self.assertIn("No Waiver Data", ctx.send.call_args.kwargs["embed"].title)
+
 
 if __name__ == "__main__":
     unittest.main()
