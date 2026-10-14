@@ -23,7 +23,30 @@ class WatsonAnalysis:
                        predicted_winner: str, odds: Dict[str, Any],
                        weighted_scores: Dict[str, float], season: int = None,
                        week: int = None) -> str:
-        """Save a prediction before the matchup happens"""
+        """Save a prediction before the matchup happens.
+
+        One prediction per matchup per season/week: a repeat save updates the
+        existing pending prediction in place instead of inserting a duplicate.
+        """
+        if season is not None and week is not None:
+            teams = {team1.casefold(), team2.casefold()}
+            existing = next(
+                (p for p in self.predictions.search(
+                    (Query().season == season) & (Query().week == week)
+                    & (Query().status == "pending"))
+                 if {p["team1"].casefold(), p["team2"].casefold()} == teams),
+                None
+            )
+            if existing:
+                self.predictions.update({
+                    "timestamp": datetime.now().isoformat(),
+                    "predicted_winner": predicted_winner,
+                    "odds": odds,
+                    "weighted_scores": weighted_scores,
+                }, Query().id == existing["id"])
+                print(f"🔁 Updated prediction: {existing['id']}")
+                return existing["id"]
+
         prediction_id = f"{matchup}_{datetime.now().isoformat()}"
 
         doc = {
