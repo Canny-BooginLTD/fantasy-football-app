@@ -71,12 +71,31 @@ def fetch_season(year: int) -> dict:
                 "away_players": _lineup(getattr(game, "away_lineup", [])),
             })
 
+    # Waiver wire: current free agents with this week's projections.
+    # Non-fatal: scores/standings still refresh if this endpoint fails.
+    try:
+        available_players = [
+            {
+                "name": p.name,
+                "position": getattr(p, "position", None),
+                "pro_team": getattr(p, "proTeam", None),
+                "injury_status": getattr(p, "injuryStatus", None) or None,
+                "points": getattr(p, "points", 0) or 0,
+                "projected_points": getattr(p, "projected_points", 0) or 0,
+            }
+            for p in league.free_agents(week=week, size=100)
+        ]
+    except Exception as exc:
+        print(f"⚠️ Could not fetch free agents: {exc}")
+        available_players = []
+
     snapshot = {
         "league_id": str(LEAGUE_ID),
         "season": year,
         "current_week": week,
         "standings": standings,
         "matchups": matchups,
+        "available_players": available_players,
         "source": "espn-api-live",
     }
 

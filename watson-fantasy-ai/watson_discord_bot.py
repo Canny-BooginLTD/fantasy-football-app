@@ -193,6 +193,58 @@ async def all_odds(ctx):
         embed = discord.Embed(title="❌ Error", description=str(e), color=discord.Color.red())
         await ctx.send(embed=embed)
 
+@bot.command(name="waivers", help="!waivers [position] [count] - Top available waiver wire players by projection")
+async def waivers(ctx, position: str = None, count: int = 10):
+    """Show top available free agents, optionally filtered by position (QB/RB/WR/TE/K/D/ST)."""
+    try:
+        count = max(1, min(count, 25))
+        db = WatsonLeagueDB()
+        current_season = max(db.get_seasons())
+        snapshot = db.get_season_data(current_season) or {}
+        players = snapshot.get("available_players", [])
+        week = snapshot.get("current_week")
+        db.close()
+
+        if not players:
+            embed = discord.Embed(
+                title="❌ No Waiver Data",
+                description="No available players in the snapshot yet. Run `!sync` to pull the waiver wire from ESPN.",
+                color=discord.Color.red()
+            )
+            await ctx.send(embed=embed)
+            return
+
+        if position:
+            pos = position.upper().replace("DEF", "D/ST").replace("DST", "D/ST")
+            players = [p for p in players if (p.get("position") or "").upper() == pos]
+            if not players:
+                await ctx.send(embed=discord.Embed(
+                    title="❌ No Players",
+                    description=f"No available players at position `{position}`. Try QB, RB, WR, TE, K, or D/ST.",
+                    color=discord.Color.red()
+                ))
+                return
+
+        players = sorted(players, key=lambda p: p.get("projected_points", 0), reverse=True)[:count]
+
+        title_pos = f" — {position.upper()}" if position else ""
+        embed = discord.Embed(
+            title=f"🔍 Waiver Wire{title_pos}",
+            description=f"Top available players by week {week} projection" if week else "Top available players by projection",
+            color=discord.Color.teal()
+        )
+        lines = []
+        for i, p in enumerate(players, 1):
+            injury = f" 🩹{p['injury_status']}" if p.get("injury_status") and p["injury_status"] != "ACTIVE" else ""
+            lines.append(f"`{i:>2}.` **{p['name']}** ({p.get('position')}, {p.get('pro_team')}){injury} — proj {p.get('projected_points', 0):.1f}")
+        embed.add_field(name="Available Players", value="\n".join(lines)[:1024], inline=False)
+        embed.set_footer(text="Projections refresh with !sync | Filter: !waivers RB 15")
+        await ctx.send(embed=embed)
+
+    except Exception as e:
+        embed = discord.Embed(title="❌ Error", description=str(e), color=discord.Color.red())
+        await ctx.send(embed=embed)
+
 @bot.command(name="ping", help="Test if bot is alive")
 async def ping(ctx):
     """Simple ping command to test bot"""
@@ -1086,6 +1138,7 @@ async def help_watson(ctx):
     # General commands
     embed.add_field(name="📋 General Commands", value="", inline=False)
     embed.add_field(name="!sync [year]", value="Pull live ESPN scores/standings (official source)", inline=False)
+    embed.add_field(name="!waivers [position] [count]", value="Top available waiver wire players by projection", inline=False)
     embed.add_field(name="!team_abbrev", value="Show all team abbreviations", inline=False)
     embed.add_field(name="!teams", value="List all league teams", inline=False)
     embed.add_field(name="!player <name>", value="Look up player stats (e.g., !player josh allen)", inline=False)
